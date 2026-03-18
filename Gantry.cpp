@@ -70,8 +70,8 @@ static constexpr double SWEEP_RADIUS_CM = 1.0;
 
 static constexpr double PI = 3.14159265358979323846;
 
-static constexpr int X_STEP_PIN = 2;
-static constexpr int X_DIR_PIN = 4;
+static constexpr int X_STEP_PIN = 25;
+static constexpr int X_DIR_PIN = 26;
 static constexpr int Y_STEP_PIN = 32;
 static constexpr int Y_DIR_PIN = 33;
 static constexpr int ENABLE_PIN = 14;
@@ -141,17 +141,40 @@ static bool hallDetected() {
 #endif
 }
 
+#if defined(__GNUC__)
+__attribute__((weak))
+#endif
+void gantryStatusTick(double currentXPct, double currentYPct, double targetXPct, double targetYPct) {
+  (void)currentXPct;
+  (void)currentYPct;
+  (void)targetXPct;
+  (void)targetYPct;
+}
+
 static void runToStepsBlocking(long targetStepsX, long targetStepsY) {
   ensureInitialized();
 
   stepperX.moveTo(targetStepsX);
   stepperY.moveTo(targetStepsY);
 
+#if defined(ARDUINO)
+  unsigned long lastTickMs = 0;
+#endif
+
   while (stepperX.distanceToGo() != 0 || stepperY.distanceToGo() != 0) {
     stepperX.run();
     stepperY.run();
 
 #if defined(ARDUINO)
+    const unsigned long now = millis();
+    if (now - lastTickMs >= 100) {
+      lastTickMs = now;
+      gantryStatusTick(
+          stepsToPctX(stepperX.currentPosition()),
+          stepsToPctY(stepperY.currentPosition()),
+          stepsToPctX(targetStepsX),
+          stepsToPctY(targetStepsY));
+    }
     delay(0);
 #endif
   }
@@ -418,14 +441,35 @@ static bool tryParseCsvLine(const std::string& line, std::string& keyOut, double
 }
 
 static Coords getCoordsFromCsv(const std::string& pos) {
-  if (pos.size() != 2) {
-    failCoords("getCoords: expected algebraic square like \"a1\"..\"h8\"");
+  auto trim = [](std::string& s) {
+    while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ' || s.back() == '\t')) {
+      s.pop_back();
+    }
+    size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
+      ++i;
+    }
+    if (i > 0) {
+      s.erase(0, i);
+    }
+  };
+
+  std::string queryKey = pos;
+  trim(queryKey);
+  if (queryKey.empty()) {
+    failCoords("getCoords: empty position string");
   }
 
-  const char file = static_cast<char>(std::tolower(static_cast<unsigned char>(pos[0])));
-  const char rank = pos[1];
-  if (file < 'a' || file > 'h' || rank < '1' || rank > '8') {
-    failCoords("getCoords: invalid square; expected \"a1\"..\"h8\"");
+  for (char& c : queryKey) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+
+  if (queryKey.size() == 2) {
+    const char file = queryKey[0];
+    const char rank = queryKey[1];
+    if (file < 'a' || file > 'h' || rank < '1' || rank > '8') {
+      failCoords("getCoords: invalid square; expected \"a1\"..\"h8\"");
+    }
   }
 
 #if defined(ARDUINO_ARCH_ESP32)
@@ -434,30 +478,40 @@ static Coords getCoordsFromCsv(const std::string& pos) {
     failCoords("getCoords: SPIFFS mount failed");
   }
 
-  File f = SPIFFS.open("/board-positions.csv", "r");
-  if (!f) {
-    f = SPIFFS.open("/chess_pos.csv", "r");
-  }
-  if (!f) {
-    failCoords("getCoords: could not open CSV (SPIFFS)");
-  }
-
-  while (f.available()) {
-    const String line = f.readStringUntil('\n');
-    std::string key;
-    double x = 0.0;
-    double y = 0.0;
-    if (!tryParseCsvLine(line.c_str(), key, x, y)) {
+  const char* candidates[] = {"/board-decimal.csv", "/board-positions.csv", "/chess_pos.csv"};
+  for (const char* path : candidates) {
+    File f = SPIFFS.open(path, "r");
+    if (!f) {
       continue;
     }
-    if (key == pos) {
-      return Coords{x, y};
+
+    while (f.available()) {
+      const String line = f.readStringUntil('\n');
+      std::string key;
+      double x = 0.0;
+      double y = 0.0;
+      if (!tryParseCsvLine(line.c_str(), key, x, y)) {
+        continue;
+      }
+
+      trim(key);
+      for (char& c : key) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+
+      if (key == queryKey) {
+        if (std::abs(x) <= 1.5 && std::abs(y) <= 1.5) {
+          x *= 100.0;
+          y *= 100.0;
+        }
+        return Coords{x, y};
+      }
     }
   }
 
-  failCoords("getCoords: square not found in CSV");
+  failCoords("getCoords: position not found in CSV");
 #else
-  const char* candidates[] = {"board-positions.csv", "chess_pos.csv"};
+  const char* candidates[] = {"board-decimal.csv", "board-positions.csv", "chess_pos.csv"};
   for (const char* path : candidates) {
     std::ifstream in(path);
     if (!in.is_open()) {
@@ -472,13 +526,23 @@ static Coords getCoordsFromCsv(const std::string& pos) {
       if (!tryParseCsvLine(line, key, x, y)) {
         continue;
       }
-      if (key == pos) {
+
+      trim(key);
+      for (char& c : key) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      }
+
+      if (key == queryKey) {
+        if (std::abs(x) <= 1.5 && std::abs(y) <= 1.5) {
+          x *= 100.0;
+          y *= 100.0;
+        }
         return Coords{x, y};
       }
     }
   }
 
-  failCoords("getCoords: square not found in CSV");
+  failCoords("getCoords: position not found in CSV");
 #endif
 }
 
@@ -495,7 +559,7 @@ Parameters / Return:
 Units:
   Percent for both x and y (0–100% covers the nominal board travel range).
 Hardware assumptions:
-  - The board-position CSV exists on the device filesystem (SPIFFS on ESP32) as "/board-positions.csv".
+  - The mapping CSV exists on the device filesystem (SPIFFS on ESP32) as "/board-decimal.csv" (preferred).
 Usage example:
   Coords c = getCoords(String("e4"));
 */
