@@ -56,7 +56,7 @@ void loop() {
 
         // Store in queue
         if (!enqueueMove(inputBuffer)) {
-          Serial.println("ERROR: Queue overflow");
+          Serial.println("ERROR: Enqueue Failed");
         }
       }
 
@@ -77,7 +77,7 @@ void loop() {
       Serial.print("Processing move: ");
       Serial.println(nextMove);
 
-      delay(1000); // simulate motors
+      delay(1000); // simulate motors/ processMove()
 
       Serial.print("Finished move: ");
       Serial.println(nextMove);
